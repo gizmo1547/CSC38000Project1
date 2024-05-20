@@ -19,6 +19,9 @@
 #define MMAP_SEQ MAP_PRIVATE
 #endif
 
+#define handle_error(msg) \
+           do { perror(msg); exit(EXIT_FAILURE); } while (0)
+
 /* NOTE: since we use counter mode, we don't need padding, as the
  * ciphertext length will be the same as that of the plaintext.
  * Here's the message format we'll use for the ciphertext:
@@ -74,16 +77,9 @@ int ske_keyGen(SKE_KEY* K, unsigned char* entropy, size_t entLen)
 	);
 
 	memcpy(K->aesKey, K->hmacKey, HM_LEN);
-
-// 	printf("md_len: 	%u\n", md_len);
-// 	printf("K->hmacKey: %.32s\n", K->hmacKey);
-//
-// 	printf("md_len: 	%u\n", md_len);
-// 	printf("K->aesKey:  %.32s\n", K->aesKey);
-
 	if(memalloc) free(entropy);
 
-	return 0;
+	return (int)md_len;
 }
 
 size_t ske_getOutputLen(size_t inputLen)
@@ -150,10 +146,100 @@ size_t ske_encrypt_file(const char* fnout, const char* fnin, SKE_KEY* K, unsigne
 {
 	/* TODO: write this.  Hint: mmap. */
 
+	/*
+	fd = open(argv[1], O_RDONLY);
+           if (fd == -1)
+               handle_error("open");
 
+           if (fstat(fd, &sb) == -1)           // To obtain file size
+               handle_error("fstat");
 
+           offset = atoi(argv[2]);
+           pa_offset = offset & ~(sysconf(_SC_PAGE_SIZE) - 1);
+               // offset for mmap() must be page aligned
 
-	return 0;
+           if (offset >= sb.st_size) {
+               fprintf(stderr, "offset is past end of file\n");
+               exit(EXIT_FAILURE);
+           }
+
+           if (argc == 4) {
+               length = atoi(argv[3]);
+               if (offset + length > sb.st_size)
+                   length = sb.st_size - offset;
+                       // Can't display bytes past end of file
+
+           } else {    // No length arg ==> display to end of file
+               length = sb.st_size - offset;
+           }
+
+           addr = mmap(NULL, length + offset - pa_offset, PROT_READ, MAP_PRIVATE, fd, pa_offset);
+           if (addr == MAP_FAILED)
+               handle_error("mmap");
+
+           s = write(STDOUT_FILENO, addr + offset - pa_offset, length);
+           if (s != length) {
+               if (s == -1)
+                   handle_error("write");
+
+               fprintf(stderr, "partial write");
+               exit(EXIT_FAILURE);
+           }
+
+           munmap(addr, length + offset - pa_offset);
+           close(fd);
+	*/
+
+	struct stat sb;
+	int fdIn = open(fnin, O_RDONLY);
+	if (fstat(fdIn, &sb) == -1)		      // To obtain file size
+	{
+		perror("fstat failed");
+		return 0;
+	}
+
+	size_t length = sb.st_size;
+	off_t pa_offset = offset_out & ~(sysconf(_SC_PAGE_SIZE) - 1);		// offset for mmap() must be page aligned
+
+	char* addr = mmap(NULL, length, PROT_READ, MMAP_SEQ, fdIn, pa_offset);
+	close(fdIn);
+
+	if (addr == MAP_FAILED)
+	{
+		perror("mmap failed");
+		return 0;
+	}
+
+	/* -------------- MAPPING SUCCESS ------------------ */
+
+	int fdOut = open(fnout, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+	if(fdOut == -1)
+	{
+			perror("open file error");
+			return 0;
+	}
+
+	unsigned char outBuf [AES_BLOCK_SIZE + 512 + HM_LEN];
+	memset(outBuf, '\0', sizeof outBuf);
+
+	size_t nWritten = 0, len = 0;
+	ssize_t s = 0;
+
+	while(length > 0)
+	{
+		len = (length > 512 ? 512 : length);
+		nWritten = ske_encrypt(outBuf, (unsigned char*)addr, len, K, NULL);
+
+		s += write(fdOut, outBuf, nWritten);
+		memset(outBuf, '\0', sizeof outBuf);
+
+		if((length -= len) > 0)	addr += len;
+	}
+
+ 	printf("\nencrypted bytes: %zu\n", s);
+
+    munmap(addr, length);
+	return s;
 }
 
 size_t ske_decrypt(unsigned char* outBuf, unsigned char* inBuf, size_t len, SKE_KEY* K)
@@ -213,5 +299,56 @@ size_t ske_decrypt(unsigned char* outBuf, unsigned char* inBuf, size_t len, SKE_
 size_t ske_decrypt_file(const char* fnout, const char* fnin, SKE_KEY* K, size_t offset_in)
 {
 	/* TODO: write this. */
-	return 0;
+
+#define block_size AES_BLOCK_SIZE + 512 + HM_LEN
+
+	struct stat sb;
+	int fdIn = open(fnin, O_RDONLY);
+	if (fstat(fdIn, &sb) == -1)		      // To obtain file size
+	{
+		perror("fstat failed");
+		return 0;
+	}
+
+	size_t length = sb.st_size;
+	off_t pa_offset = offset_in & ~(sysconf(_SC_PAGE_SIZE) - 1);		// offset for mmap() must be page aligned
+
+	char* addr = mmap(NULL, length, PROT_READ, MMAP_SEQ, fdIn, pa_offset);
+	close(fdIn);
+	if (addr == MAP_FAILED)
+	{
+		perror("mmap failed");
+		return 0;
+	}
+
+	/* -------------- MAPPING SUCCESS ------------------ */
+
+	int fdOut = open(fnout, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+	if(fdOut == -1)
+	{
+			perror("open file error");
+			return 0;
+	}
+
+	unsigned char outBuf [512];
+	memset(outBuf, '\0', sizeof outBuf);
+
+	size_t nWritten = 0, len = 0;
+	ssize_t s = 0;
+
+	while(length > 0)
+	{
+		len = (length > block_size ? block_size : length);
+		nWritten = ske_decrypt(outBuf, (unsigned char*)addr, len, K);
+
+		s += write(fdOut, outBuf, nWritten);
+		memset(outBuf, '\0', sizeof outBuf);
+
+		if((length -= len) > 0)	addr += len;
+	}
+
+ 	printf("\ndecrypted bytes: %zu\n", s);
+
+    munmap(addr, length);
+	return s;
 }
