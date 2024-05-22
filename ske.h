@@ -1,3 +1,4 @@
+//ske.h
 /* interface for CCA2 symmetric key encryption (SKE) */
 #pragma once
 
